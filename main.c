@@ -35,6 +35,7 @@
 static struct opts_s {
     int         output_dsf;
     int         output_dsdiff;
+    int         output_stdout;
     int         ignore_tags;
     int         verbose;
     const char *input_file;
@@ -52,6 +53,7 @@ static int parse_options(int argc, char *argv[])
         "Usage: %s [options] inputfile outputfile\n"
         "  -p, --output-dsdiff             : output as Philips DSDIFF (.dff) file\n"
         "  -s, --output-dsf                : output as Sony DSF (.dsf) file\n"
+        "  -o, --output-stdout             : output raw Interleaved MSBF DSD to stdout\n"
         "  -t, --ignore-tags               : ignore (do not copy) ID3 tags\n"
         "  -v, --verbose                   : print file info and progress\n"
         "  inputfile                       : source file\n"
@@ -66,10 +68,11 @@ static int parse_options(int argc, char *argv[])
         "Usage: %s [-p|--output-dsdiff] [-s|--output-dsf] [-t|--ignore-tags]\n"
         "  [-v|--verbose] [-?|--help] [--usage] inputfile outputfile\n";
 
-    static const char options_string[] = "pstv?";
+    static const char options_string[] = "psotv?";
     static const struct option options_table[] = {
             { "output-dsdiff", no_argument, NULL, 'p' },
             { "output-dsf", no_argument, NULL, 's' },
+            { "output-stdout", no_argument, NULL, 'o' },
             { "ignore-tags", no_argument, NULL, 't' },
             { "verbose", no_argument, NULL, 'v' },
 
@@ -89,6 +92,9 @@ static int parse_options(int argc, char *argv[])
         case 's':
             opts.output_dsf = 1;
             break;
+        case 'o':
+            opts.output_stdout = 1;
+            break;
         case 't':
             opts.ignore_tags = 1;
             break;
@@ -97,7 +103,7 @@ static int parse_options(int argc, char *argv[])
             break;
 
         case '?':
-            fprintf(stdout, help_text, program_name);
+            fprintf(stderr, help_text, program_name);
             return 0;
 
         case 'u':
@@ -112,16 +118,16 @@ static int parse_options(int argc, char *argv[])
         return 0;
     }
 
-    if (optind < argc - 1) {
+    if (optind < argc) {
         opts.input_file = argv[optind++];
         opts.output_file = argv[optind++];
 
         /* Detect output format from filename if not specified */
-        if (!opts.output_dsf && !opts.output_dsdiff) {
+        if (!opts.output_dsf && !opts.output_dsdiff && !opts.output_stdout) {
             size_t oflen = strlen(opts.output_file);
-            if (oflen > 4 && !strnicmp(opts.output_file + oflen - 4, ".dff", 4)) {
+            if (oflen > 4 && !strncasecmp(opts.output_file + oflen - 4, ".dff", 4)) {
                 opts.output_dsdiff = 1;
-            } else if (oflen > 4 && !strnicmp(opts.output_file + oflen - 4, ".dsf", 4)) {
+            } else if (oflen > 4 && !strncasecmp(opts.output_file + oflen - 4, ".dsf", 4)) {
                 opts.output_dsf = 1;
             } else {
                 fprintf(stderr, "no output format specified\n");
@@ -129,7 +135,7 @@ static int parse_options(int argc, char *argv[])
                 return 0;
             }
         }
-    } else {
+    } else if (!opts.output_stdout) {
         fprintf(stderr, "input or output file not specified\n");
         fprintf(stderr, usage_text, program_name);
         return 0;
@@ -176,21 +182,41 @@ int main(int argc, char* argv[])
                     uint64_t sample_count = reader.data_length * 8 / reader.channel_count;
 
                     if (reader.container_format == DSD_FORMAT_DSF) {
-                        printf("Source file is DSF\n");
+                        fprintf(stderr, "Source file is DSF\n");
                     } else if (reader.compressed) {
-                        printf("Source file is DST-compressed DSDIFF\n");
+                        fprintf(stderr, "Source file is DST-compressed DSDIFF\n");
                     } else {
-                        printf("Source file is uncompressed DSDIFF\n");
+                        fprintf(stderr, "Source file is uncompressed DSDIFF\n");
                     }
-                    printf("Uncompressed DSD size: %" PRIu64 ", sample rate: %" PRIu32 ", channels: %" PRIu8 "\n",
+                    fprintf(stderr, "Uncompressed DSD size: %" PRIu64 ", sample rate: %" PRIu32 ", channels: %" PRIu8 "\n",
                         reader.data_length, reader.sample_rate, reader.channel_count);
-                    printf("Duration: %02" PRIu64 ":%02" PRIu64 ":%02" PRIu64 ".%03" PRIu64 " (%" PRIu64 " samples)\n",
+                    fprintf(stderr, "Duration: %02" PRIu64 ":%02" PRIu64 ":%02" PRIu64 ".%03" PRIu64 " (%" PRIu64 " samples)\n",
                         sample_count / reader.sample_rate / 3600, (sample_count / reader.sample_rate / 60) % 60,
                         (sample_count / reader.sample_rate) % 60, (sample_count * 1000 / reader.sample_rate) % 1000,
                         sample_count);
                 }
 
-                if ((out_file = fopen(opts.output_file, "wb")) != NULL) {
+                if (opts.output_stdout) {
+                    char* buffer = malloc(BUFFER_SIZE);
+                    size_t length;
+
+                    /* Main audio data */
+                    while ((length = dsd_reader_read(buffer, BUFFER_SIZE, &reader)) > 0) {
+                        //dsd_writer_write(buffer, length, &writer);
+                        fwrite(buffer, 1, length, stdout);
+
+                        if (opts.verbose) {
+                            //printf("\r%2" PRIu64 "%%", writer.data_length * 100 / reader.data_length);
+                            fprintf(stderr, "\r%2" PRIu64 " samples written", reader.data_length);
+                        }
+                    }
+                    if (opts.verbose) {
+                        fprintf(stderr, "\n");
+                    }
+
+                    result = 0; /* Success! */
+                }
+                else if ((out_file = fopen(opts.output_file, "wb")) != NULL) {
                     dsd_writer_t writer;
                     char* buffer = malloc(BUFFER_SIZE);
                     size_t length;
@@ -203,12 +229,12 @@ int main(int argc, char* argv[])
                     while ((length = dsd_reader_read(buffer, BUFFER_SIZE, &reader)) > 0) {
                         dsd_writer_write(buffer, length, &writer);
                         if (opts.verbose) {
-                            printf("\r%2" PRIu64 "%%", writer.data_length * 100 / reader.data_length);
+                            fprintf(stderr, "\r%2" PRIu64 "%%", writer.data_length * 100 / reader.data_length);
                         }
                     }
 
                     if (opts.verbose) {
-                        printf("\n");
+                        fprintf(stderr, "\n");
                     }
 
                     /* Format-specific extensions (DSDIFF comment/edit master, ID3 tags, etc.) */
@@ -217,7 +243,7 @@ int main(int argc, char* argv[])
                             && dsd_writer_next_chunk(ext, &writer)) {
                             if (opts.verbose) {
                                 char *extc = (char*) &ext;
-                                printf("Writing %c%c%c%c...\n", extc[0], extc[1], extc[2], extc[3]);
+                                fprintf(stderr, "Writing %c%c%c%c...\n", extc[0], extc[1], extc[2], extc[3]);
                             }
                             while ((length = dsd_reader_read(buffer, BUFFER_SIZE, &reader)) > 0) {
                                 dsd_writer_write(buffer, length, &writer);
